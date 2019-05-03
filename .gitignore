@@ -1,7 +1,8 @@
+.pytest_cache/
+*.whl
 examples/hsbench-samples
 
 .vscode/
-.reqwire.lock
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -25,6 +26,7 @@ lib64/
 parts/
 sdist/
 var/
+wheelhouse/
 wheels/
 *.egg-info/
 .installed.cfg

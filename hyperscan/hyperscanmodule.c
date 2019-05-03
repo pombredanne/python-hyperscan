@@ -9,7 +9,9 @@
 #define HANDLE_HYPERSCAN_ERR(err, rv) if (err != HS_SUCCESS) { \
     char serr[80]; \
     sprintf(serr, "error code %i", err); \
+    PyGILState_STATE gstate = PyGILState_Ensure(); \
     PyErr_SetString(HyperscanError, serr); \
+    PyGILState_Release(gstate); \
     return rv; \
   }
 
@@ -63,47 +65,18 @@ typedef struct {
   hs_scratch_t *scratch;
 } Scratch;
 
-static const char* get_package_version(void) {
-  char *version;
-  PyObject *pkg_resources, *odist, *oversion;
-  pkg_resources = PyImport_ImportModuleNoBlock("pkg_resources");
-  odist = PyObject_CallMethod(pkg_resources, "get_distribution",
-                              "s", "hyperscan");
-
-  if (PyErr_Occurred()) {
-    Py_DECREF(odist);
-    return DEFAULT_VERSION;
-  }
-
-  oversion = PyObject_GetAttrString(odist, "version");
-#if PY_MAJOR_VERSION >= 3
-  if (PyUnicode_Check(oversion)) {
-    PyObject *bytes = PyUnicode_AsUTF8String(oversion);
-    version = PyBytes_AsString(bytes);
-  } else {
-    return DEFAULT_VERSION;
-  }
-#else
-  version = PyBytes_AsString(oversion);
-#endif
-
-  Py_DECREF(pkg_resources);
-  Py_DECREF(odist);
-  Py_DECREF(oversion);
-
-  return version;
-}
-
 static int match_handler(unsigned int id, unsigned long long from,
                          unsigned long long to, unsigned int flags,
                          void *context) {
   py_scan_callback_ctx *cctx = context;
   PyGILState_STATE gstate;
   gstate = PyGILState_Ensure();
-  PyObject_CallFunction(cctx->callback, "IIIIO", id, from, to, flags,
-                        cctx->ctx);
+  PyObject *rv = PyObject_CallFunction(cctx->callback, "IIIIO", id,
+                                       from, to, flags, cctx->ctx);
+  int halt = rv == Py_None ? 0 : PyObject_IsTrue(rv);
   PyGILState_Release(gstate);
-  return 0;
+  Py_XDECREF(rv);
+  return halt;
 }
 
 static void Database_dealloc(Database* self) {
@@ -249,6 +222,7 @@ static PyObject* Database_size(Database *self, PyObject *args) {
 static PyObject* Database_scan(Database *self, PyObject *args, PyObject *kwds) {
   char *data;
   Py_ssize_t length;
+  hs_error_t err;
   unsigned int flags = 0;
   PyObject *ocallback = Py_None,
             *oscratch = Py_None,
@@ -261,7 +235,7 @@ static PyObject* Database_scan(Database *self, PyObject *args, PyObject *kwds) {
     return NULL;
   py_scan_callback_ctx cctx = {ocallback, octx};
   Py_BEGIN_ALLOW_THREADS
-  hs_error_t err = hs_scan(
+  err = hs_scan(
     self->db,
     data,
     length,
@@ -271,8 +245,8 @@ static PyObject* Database_scan(Database *self, PyObject *args, PyObject *kwds) {
     ocallback == Py_None ? NULL : match_handler,
     ocallback == Py_None ? NULL : (void*)&cctx
   );
-  HANDLE_HYPERSCAN_ERR(err, NULL);
   Py_END_ALLOW_THREADS
+  HANDLE_HYPERSCAN_ERR(err, NULL);
   Py_RETURN_NONE;
 }
 
@@ -487,6 +461,7 @@ static PyObject* Stream_exit(Stream *self) {
 static PyObject* Stream_scan(Stream *self, PyObject *args, PyObject *kwds) {
   char *data;
   Py_ssize_t length;
+  hs_error_t err;
   unsigned int flags;
   PyObject *ocallback = Py_None, *octx = Py_None, *oscratch = Py_None;
   hs_scratch_t *scratch = NULL;
@@ -516,7 +491,7 @@ static PyObject* Stream_scan(Stream *self, PyObject *args, PyObject *kwds) {
   py_scan_callback_ctx cctx = {ocallback, octx};
 
   Py_BEGIN_ALLOW_THREADS;
-  hs_error_t err = hs_scan_stream(
+  err = hs_scan_stream(
     self->identifier,
     data,
     length,
@@ -525,8 +500,8 @@ static PyObject* Stream_scan(Stream *self, PyObject *args, PyObject *kwds) {
     ocallback == Py_None ? NULL : match_handler,
     ocallback == Py_None ? NULL : (void*)&cctx
   );
-  HANDLE_HYPERSCAN_ERR(err, NULL);
   Py_END_ALLOW_THREADS;
+  HANDLE_HYPERSCAN_ERR(err, NULL);
   Py_RETURN_NONE;
 }
 
@@ -794,10 +769,10 @@ static PyMethodDef Hyperscan_methods[] = {
   {NULL}
 };
 
-MOD_INIT(hyperscan) {
+MOD_INIT(_hyperscan) {
   PyObject *m;
 
-  MOD_DEF(m, "hyperscan", "Hyperscan bindings for CPython.", Hyperscan_methods);
+  MOD_DEF(m, "_hyperscan", "Hyperscan bindings for CPython.", Hyperscan_methods);
 
   if (!m)
     return MOD_ERROR_VAL;
@@ -858,7 +833,7 @@ MOD_INIT(hyperscan) {
   Py_INCREF(&StreamType);
   PyModule_AddObject(m, "Stream", (PyObject*)&StreamType);
 
-  PyModule_AddStringConstant(m, "__version__", get_package_version());
+  PyModule_AddStringConstant(m, "__version__", hs_version());
 
   return MOD_SUCCESS_VAL(m);
 }
